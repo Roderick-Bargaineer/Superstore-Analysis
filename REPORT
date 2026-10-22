@@ -1,0 +1,128 @@
+# Superstore Sales and Profitability Analysis
+
+## Executive Summary
+
+Superstore's sales grew 51% from 2014 to 2017 ($484K to $733K), and profit grew 89% ($49.6K to $93.4K). Growth is profitable overall, with a 12.5% margin across $2.30M in sales. However, **deep discounting is leaking a large amount of profit.**
+
+- Line items discounted **more than 20%** (1,392 of 9,993) generated $362K in sales and **lost $135K**, a margin of **-37.3%**. Every other sale earned a **21.8%** margin.
+- The 2017 margin dip (13.4% to 12.7%) is **not a product-mix problem**. Mix actually added 1.2 points; margins *within* products fell 1.9 points, and profit lost on deep-discount lines rose 52% in one year ($31K to $48K).
+- The problem is concentrated: Texas, Ohio, Pennsylvania, and Illinois lose a combined **$70.9K**, and 28% of Central-region lines are discounted over 20% (West: 4%).
+
+**Recommendation:** introduce a discount cap and approval process for discounts over 20%, starting with Furniture and the four loss-making states. If the same units sold at a 20% maximum discount, profit would have been up to **$219K higher** (an upper bound; see Limitations).
+
+## Data and Method
+
+- **Source:** Superstore orders, January 2014 to December 2017; 9,994 line items, 5,009 orders, 793 customers.
+- **Tools:** SQL (DuckDB). Full script: `superstore_analysis.sql`.
+- **Data quality:**
+  - No missing values in key fields.
+  - **One exact duplicate row** (Row ID 3407, a $281 chair sale) was removed. My first duplicate check could not detect it because it included the unique Row ID in the comparison; the corrected check excludes it.
+  - 32 Product IDs map to more than one product name, so product-level analysis uses sub-category instead.
+  - 1,870 line items (18.7%) are loss-making. They were kept, since they are real outcomes and not errors.
+- **Metrics:** margin = profit / sales. Discount bands and "deep discount" (over 20%) were defined from the data's discount distribution.
+
+## 1. Growth and Margin Trend
+
+| Year | Sales | Profit | Margin | Sales growth |
+|---|---|---|---|---|
+| 2014 | $484.0K | $49.6K | 10.2% | n/a |
+| 2015 | $470.5K | $61.6K | 13.1% | -2.8% |
+| 2016 | $609.2K | $81.8K | 13.4% | +29.5% |
+| 2017 | $733.2K | $93.4K | 12.7% | +20.4% |
+
+Margin improved from 2014 to 2016 and slipped 0.7 points in 2017. The 2017 drop is small but worth understanding, because it happened during the fastest growth.
+
+**Why did margin fall in 2017?** A mix-vs-rate decomposition by sub-category splits the -0.7 point change:
+
+| Effect | Points |
+|---|---|
+| Product mix (shift in what was sold) | **+1.2** |
+| Margin within products (rate) | **-1.9** |
+| Total | -0.7 |
+
+The shift in product mix helped margin. The decline came from lower margins inside the same products, with the largest drops in Machines (5.2% to -6.6%), Binders (20.6% to 10.5%), and Tables (-4.9% to -13.4%). This points to pricing and discounting.
+
+## 2. Discounting: The Core Finding
+
+| Discount band | Margin |
+|---|---|
+| None | ~29.5% |
+| 1-10% | ~16.6% |
+| 11-20% | ~11.6% |
+| 21-30% | ~-10% |
+| Over 30% | ~-48% |
+
+Margin falls steadily as discounts rise and turns negative above 20%. Lines discounted over 20% lost $28.0K (2014), $28.4K (2015), $31.4K (2016), and $47.6K (2017).
+
+Tables show the problem in miniature: they lost $17.7K (-8.6% margin), and 55% of Table lines carry a discount over 20%.
+
+## 3. Product Performance
+
+| Category | Sales | Profit | Margin |
+|---|---|---|---|
+| Technology | $836K | $145.5K | 17.4% |
+| Furniture | $742K | $18.5K | **2.5%** |
+| Office Supplies | $719K | $122.5K | 17.0% |
+
+Furniture generates nearly as much revenue as Technology but about one-eighth of the profit. Three sub-categories lose money: **Tables (-$17.7K)**, Bookcases (-$3.5K), and Supplies (-$1.2K). Machines are barely profitable (1.8% margin on $189K in sales).
+
+## 4. Segments
+
+| Segment | Sales | Profit | Margin |
+|---|---|---|---|
+| Consumer | $1.16M | $134.1K | 11.5% |
+| Corporate | $706K | $92.0K | 13.0% |
+| Home Office | $429K | $60.3K | 14.0% |
+
+Consumers drive half of sales but earn the lowest margin. Home Office is the smallest segment with the best margin.
+
+## 5. Geography
+
+| Region | Sales | Profit | Margin | Lines discounted over 20% |
+|---|---|---|---|---|
+| West | $725K | $108.4K | 14.9% | 3.7% |
+| East | $678K | $91.5K | 13.5% | 16.2% |
+| South | $392K | $46.7K | 11.9% | 10.6% |
+| Central | $501K | $39.7K | **7.9%** | **27.7%** |
+
+Regional margin tracks discounting almost exactly. Ten states lose money, totaling -$98.2K. The four largest losses:
+
+| State | Profit | Margin | Lines over 20% discount |
+|---|---|---|---|
+| Ohio | -$17.0K | -21.7% | 38% |
+| Texas | -$25.7K | -15.1% | 42% |
+| Illinois | -$12.6K | -15.7% | 46% |
+| Pennsylvania | -$15.6K | -13.4% | 40% |
+
+California ($76.4K), New York ($74.0K), and Washington ($33.4K) are the top profit states. At city level, Philadelphia (-$13.8K) and Houston (-$10.2K) are the largest losses.
+
+## 6. Customers
+
+- **Profit is concentrated:** the top 10% of customers generate roughly 57% of profit.
+- **155 of 793 customers (20%) are unprofitable**, costing $71.2K in total.
+- **Sales rank is not profit rank.** The top customer by sales, Sean Miller ($25.0K), lost $2.0K, while Tamara Chand ($19.1K in sales) earned $9.0K at a 47% margin.
+
+## 7. Market Deep Dive: Michigan and Virginia
+
+Both are small but high-margin markets (Michigan 32.1%, Virginia 26.3%), with about 30 orders a year each.
+
+- **Michigan** sales grew from $6K (2014) to $27K (2016), then flattened in 2017 ($26K). Growth was strong early but has plateaued.
+- **Virginia** sales swing between $26K and $8K year to year (2014: $26K, 2015: $10K, 2016: $27K, 2017: $8K). Nearly every active customer is new each year: returning customers were 0, 0, 3, and 1. Virginia's volatility is a **retention problem**, with the business depending on acquiring new buyers every year.
+
+Because order counts are small, a few large orders can move these numbers. Treat them as signals to investigate, not as proof of a trend.
+
+## Recommendations
+
+1. **Cap discounts at 20% with manager approval above it.** Deep-discount lines lost $135K. A 20% cap at unchanged volume would have added up to $219K (upper bound).
+2. **Review Furniture pricing first.** Tables, Bookcases, and Supplies are structurally unprofitable at current discount levels; test higher list prices or tighter discount rules.
+3. **Audit Texas, Ohio, Pennsylvania, and Illinois.** Find out who approves these discounts and why, then compare with the West, which sells profitably with almost no deep discounts.
+4. **Flag unprofitable customers** (155 accounts) for pricing review, and protect the high-margin ones that drive most of the profit.
+5. **Build repeat-purchase programs in small high-margin states like Virginia**, where growth currently relies on one-time buyers.
+
+## Limitations
+
+- **No cost, returns, or inventory data.** Cost is inferred as sales minus profit.
+- **Correlation, not proof.** Deep discounts could be deliberate clearance of end-of-life stock. I cannot tell from this data.
+- **The $219K scenario assumes no volume loss** at higher prices, so it is a ceiling. The more defensible number is the $135K already lost on those lines.
+- **Small samples** in individual states and cities (about 30 orders a year in Michigan and Virginia).
+- **Four years of history (2014-2017)**, so results may not reflect current performance.
