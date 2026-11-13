@@ -1,507 +1,133 @@
-# Superstore-Analysis
-Superstore Profitability Analysis
-/* =============================================================================
-   PROJECT:  Superstore Profitability Analysis
-   QUESTION: Superstore's sales are growing. Is the growth profitable, and
-             what is driving profit leakage?
-   DATA:     Superstore orders, Jan 2014 - Dec 2017 (9,994 line items)
-   TOOLS:    DuckDB, SQL (CTEs, window functions, conditional aggregation)
+# Superstore Profitability Analysis
 
-   HEADLINE FINDING
-   Margin erosion is driven by deep discounting, not by product mix. Line items
-   discounted more than 20% lose money overall, while all other sales earn a
-   21.8% margin.
+**Is Superstore's sales growth profitable, and what is driving profit leakage?**
 
-   CONTENTS
-   Part 0. Setup
-   Part 1. Data quality checks and cleaned view
-   Part 2. Growth and margin trend (year over year)
-   Part 3. Why did margin move? Mix vs. rate decomposition
-   Part 4. Discount analysis
-   Part 5. Product performance
-   Part 6. Geography
-   Part 7. Customers and segments
-   Part 8. Market deep dive: Michigan and Virginia
+An analysis of 9,994 order line items (Jan 2014 – Dec 2017) using SQL (DuckDB). The work covers data validation, year-over-year margin analysis, a mix vs. rate decomposition, a discount scenario model, and geographic and customer profitability.
 
-   NOTES
-   - Each statement ends with a semicolon and has no blank lines inside it.
-   - After Part 1, every query reads from orders_clean, not orders.
-   ============================================================================= */
+---
 
+## Executive Summary
 
-/* =============================================================================
-   PART 0. SETUP
-   Rename the source file to data/superstore.csv before running.
-   ============================================================================= */
+Sales grew **51.5%** from 2014 to 2017 ($484K to $733K) and profit grew **88.6%** ($49.6K to $93.4K), lifting margin from **10.2% to 12.7%**. But 2017 shows a warning sign: **sales grew 20.4% while profit grew only 14.2%, and margin fell 0.68 pts from its 2016 peak of 13.4%.**
 
-CREATE OR REPLACE TABLE orders AS
-SELECT *
-FROM read_csv_auto('data/superstore.csv');
+The main driver is discounting. **Line items discounted more than 20% lose money in aggregate (-37.3% margin, -$135K profit), while all other sales earn a 21.8% margin.**
 
+**Key findings**
 
-/* =============================================================================
-   PART 1. DATA QUALITY CHECKS
-   ============================================================================= */
+1. **Growth is real but margin slipped in 2017.** Margin fell 0.68 pts in 2017. Product mix *helped* (+1.17 pts) but within-sub-category margin rates *hurt* more (-1.86 pts), so the decline is a pricing and discount problem, not a product-mix problem. *(Query 3.1)*
+2. **Deep discounts cause most of the losses.** Lines discounted over 20% are 13.9% of line items and 15.8% of sales, but 1,347 of those 1,392 lines (97%) lose money, and they account for **89% of all line-level losses** ($138.5K of $156.1K). *(Queries 4.2, 4.3)*
+3. **The effect holds within product categories.** Deep discounts appear in 9 of 17 sub-categories. In 8 of those 9, deep-discount lines have negative margins while non-deep lines in the same sub-category are profitable (for example, Binders: -106.6% vs. +41.1%). Holding sub-category mix constant, non-deep margin is +22.1% vs. -48.5% for deep. *(Query 4.1 and extension)*
+4. **Losses are concentrated.** Binders, Tables and Machines hold 73% of deep-discount losses. Three sub-categories (Tables, Bookcases, Supplies) lose money outright, for -$22.4K combined. Furniture earns a 2.5% margin vs. 17% for the other categories. *(Query 5.3)*
+5. **10 of 49 states lose money (-$98.2K combined).** Texas (-$25.7K), Ohio (-$17.0K), Pennsylvania (-$15.6K) and Illinois (-$12.6K) lead. These states have a deep-discount share of 34.6% of lines vs. 13.9% overall. *(Query 6.3)*
+6. **Customer profit is concentrated and 1 in 5 customers loses money.** 155 of 793 customers (19.5%) are unprofitable, costing $71.2K. The top 10% of customers generate 58% of net profit. *(Queries 7.3, 7.4)*
 
--- 1.1 Row counts and date range
-SELECT
-    COUNT(*) AS total_rows,
-    COUNT(DISTINCT "Order ID") AS unique_orders,
-    COUNT(DISTINCT "Customer ID") AS unique_customers,
-    MIN("Order Date") AS first_order,
-    MAX("Order Date") AS last_order
-FROM orders;
+## Recommendations
 
--- 1.2 Missing values in key columns
-SELECT
-    COUNT(*) FILTER (WHERE sales IS NULL) AS missing_sales,
-    COUNT(*) FILTER (WHERE profit IS NULL) AS missing_profit,
-    COUNT(*) FILTER (WHERE quantity IS NULL) AS missing_quantity,
-    COUNT(*) FILTER (WHERE discount IS NULL) AS missing_discount,
-    COUNT(*) FILTER (WHERE "Customer ID" IS NULL) AS missing_customer_id,
-    COUNT(*) FILTER (WHERE "Product ID" IS NULL) AS missing_product_id,
-    COUNT(*) FILTER (WHERE "Order Date" IS NULL) AS missing_order_date,
-    COUNT(*) FILTER (WHERE "Ship Date" IS NULL) AS missing_ship_date
-FROM orders;
+| # | Recommendation | Estimated impact | Basis |
+|---|----------------|------------------|-------|
+| 1 | Cap discounts at 20%, starting with Binders, Machines and Tables | **+$135K to +$219K profit** (see range below) | Query 4.4 |
+| 2 | Review discount approval in the 10 loss-making states, starting with Texas, Ohio, Pennsylvania and Illinois | Up to $98K of state-level losses in scope | Query 6.3 |
+| 3 | Reprice or review Tables and Bookcases (loss-making even before deep discounts are isolated) | Up to $21K of losses in scope | Query 5.3 |
+| 4 | Review the 155 unprofitable customers for discount terms | Up to $71K of customer-level losses in scope | Query 7.3 |
 
--- 1.3 Duplicate rows.
---     "Row ID" is unique by definition, so it MUST be excluded from the
---     comparison. Including it can never find a duplicate.
-SELECT COUNT(*) AS duplicate_rows
-FROM (
-    SELECT
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                "Order ID", "Order Date", "Ship Date", "Ship Mode",
-                "Customer ID", "Customer Name", segment, country, city, state,
-                "Postal Code", region, "Product ID", category, "Sub-Category",
-                "Product Name", sales, quantity, discount, profit
-            ORDER BY "Row ID"
-        ) AS rn
-    FROM orders
-)
-WHERE rn > 1;
+> **How to read the range for Recommendation 1.** The **$219K** upper bound assumes customers buy the same units at the higher price. The **$135K** lower bound assumes the deep-discount lines simply aren't sold (volume loss of 100%), which removes the losses but forgoes any revenue. The true outcome likely sits between them. The 20% cap stays above $135K at every volume-loss level.
+>
+> Even with the cap, 198 of the 1,392 repriced lines would still lose money because their cost exceeds the 20%-off price.
 
--- 1.4 Inspect the duplicate (Row IDs 3406 and 3407 in this dataset)
-SELECT "Row ID", "Order ID", "Product Name", sales, quantity, profit
-FROM orders
-WHERE "Order ID" = 'US-2014-150119'
-ORDER BY "Row ID";
+## Sensitivity: What if volume drops when discounts are capped?
 
--- 1.5 Product IDs that map to more than one product name
-SELECT
-    "Product ID",
-    COUNT(DISTINCT "Product Name") AS name_variants
-FROM orders
-GROUP BY "Product ID"
-HAVING COUNT(DISTINCT "Product Name") > 1
-ORDER BY name_variants DESC;
+Change in total profit (vs. $286K baseline) by discount cap and share of volume lost on repriced lines:
 
--- 1.6 Value ranges and logical checks
-SELECT
-    MIN(sales) AS min_sales,
-    MAX(sales) AS max_sales,
-    MIN(profit) AS min_profit,
-    MAX(profit) AS max_profit,
-    MIN(quantity) AS min_quantity,
-    MAX(quantity) AS max_quantity,
-    MIN(discount) AS min_discount,
-    MAX(discount) AS max_discount,
-    COUNT(*) FILTER (WHERE "Ship Date" < "Order Date") AS ship_before_order,
-    COUNT(*) FILTER (WHERE profit < 0) AS loss_making_lines,
-    ROUND(AVG(CASE WHEN profit < 0 THEN 1.0 ELSE 0 END) * 100, 1) AS pct_lines_loss_making
-FROM orders;
+| Discount cap | 0% volume loss | 10% | 25% | 50% | 75% | 100% |
+|--------------|----------------|-----|-----|-----|-----|------|
+| 10% | +$389K | +$355K | +$303K | +$216K | +$130K | +$44K |
+| **20%** | **+$219K** | **+$211K** | **+$198K** | **+$177K** | **+$156K** | **+$135K** |
+| 30% | +$146K | +$144K | +$141K | +$136K | +$130K | +$125K |
 
--- 1.7 Cleaned view used for ALL analysis below.
---     Keeps one copy of any exact duplicate. Loss-making lines are kept: they
---     are real business outcomes, not errors.
-CREATE OR REPLACE VIEW orders_clean AS
-SELECT * EXCLUDE (rn)
-FROM (
-    SELECT
-        *,
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                "Order ID", "Order Date", "Ship Date", "Ship Mode",
-                "Customer ID", "Customer Name", segment, country, city, state,
-                "Postal Code", region, "Product ID", category, "Sub-Category",
-                "Product Name", sales, quantity, discount, profit
-            ORDER BY "Row ID"
-        ) AS rn
-    FROM orders
-)
-WHERE rn = 1;
+A 20% cap is the most defensible choice: it removes nearly all of the losses without repricing the 3,709 lines at 11–20% discount, which are still profitable (11.6% margin). A 10% cap is riskier because it reprices profitable lines too, and at high volume loss it gives up most of the gain.
+
+## Why 20%?
+
+| Discount band | Lines | % of lines | Margin | % of lines losing money |
+|---------------|-------|-----------|--------|-------------------------|
+| None | 4,798 | 48.0% | 29.5% | 0.0% |
+| 1–10% | 94 | 0.9% | 16.6% | 4.3% |
+| 11–20% | 3,709 | 37.1% | 11.6% | 14.0% |
+| 21–30% | 226 | 2.3% | -10.1% | 91.6% |
+| 31–50% | 310 | 3.1% | -24.8% | 91.6% |
+| Over 50% | 856 | 8.6% | -119.2% | 100.0% |
+
+Profitability breaks sharply above 20%, which is why it is the threshold used throughout.
+
+## A natural comparison: Michigan and Virginia
+
+Michigan and Virginia are the #4 and #5 states by total profit ($24.5K and $18.6K, about 115 orders each), and they **barely discount at all: average discount is 0.7% in Michigan and 0.0% in Virginia, with zero deep-discount lines**. Their margins are 32.1% and 26.3%, versus -15% to -22% in the heavily discounting states such as Texas and Ohio. Michigan and Virginia are not unique: other low-discount states such as Indiana (34.3% margin) and Georgia (33.1%) look similar. Across all 49 states, average discount and margin are almost perfectly inversely related (correlation of -0.96). This is a correlation across states, not proof of cause, but it is consistent with the line-level findings.
+
+Caution: each state has only about 30 orders a year, so year-to-year swings (for example Virginia's sales dropping from $26.7K in 2016 to $7.6K in 2017) may reflect a few large orders.
+
+## Visuals
 
 
-/* =============================================================================
-   PART 2. GROWTH AND MARGIN TREND
-   ============================================================================= */
 
--- 2.1 Year-over-year sales, profit, and margin
-WITH yearly AS (
-    SELECT
-        EXTRACT(YEAR FROM "Order Date") AS order_year,
-        COUNT(DISTINCT "Order ID") AS orders,
-        SUM(sales) AS total_sales,
-        SUM(profit) AS total_profit
-    FROM orders_clean
-    GROUP BY EXTRACT(YEAR FROM "Order Date")
-)
-SELECT
-    order_year,
-    orders,
-    ROUND(total_sales, 0) AS total_sales,
-    ROUND(total_profit, 0) AS total_profit,
-    ROUND(total_profit / total_sales * 100, 2) AS margin_pct,
-    ROUND((total_sales / LAG(total_sales) OVER (ORDER BY order_year) - 1) * 100, 1) AS sales_growth_pct,
-    ROUND((total_profit / total_sales - LAG(total_profit / total_sales) OVER (ORDER BY order_year)) * 100, 2) AS margin_change_pts
-FROM yearly
-ORDER BY order_year;
+1. Sales, profit and margin by year
+2. Margin by discount band
+3. Mix vs. rate effect by year
+4. Profit by state (loss-making states highlighted)
+5. Customer profit concentration by decile
 
+---
 
-/* =============================================================================
-   PART 3. WHY DID MARGIN MOVE? MIX VS. RATE DECOMPOSITION
-   Splits each year's margin change into:
-   - mix effect:  shift in sales share between sub-categories (at prior margins)
-   - rate effect: change in margin WITHIN each sub-category (at current mix)
-   mix_effect + rate_effect = total change in margin (percentage points).
-   ============================================================================= */
+## Method
 
--- 3.1 Margin change decomposition by year
-WITH yearly_sub AS (
-    SELECT
-        EXTRACT(YEAR FROM "Order Date") AS order_year,
-        "Sub-Category" AS sub_category,
-        SUM(sales) AS sub_sales,
-        SUM(profit) AS sub_profit
-    FROM orders_clean
-    GROUP BY EXTRACT(YEAR FROM "Order Date"), "Sub-Category"
-),
-shares AS (
-    SELECT
-        order_year,
-        sub_category,
-        sub_sales / SUM(sub_sales) OVER (PARTITION BY order_year) AS sales_share,
-        sub_profit / sub_sales AS margin
-    FROM yearly_sub
-),
-compare AS (
-    SELECT
-        b.order_year,
-        a.sales_share AS share_prev,
-        b.sales_share AS share_curr,
-        a.margin AS margin_prev,
-        b.margin AS margin_curr
-    FROM shares a
-    JOIN shares b
-        ON a.sub_category = b.sub_category
-        AND b.order_year = a.order_year + 1
-)
-SELECT
-    order_year,
-    ROUND(SUM(share_curr * margin_curr - share_prev * margin_prev) * 100, 2) AS total_margin_change_pts,
-    ROUND(SUM((share_curr - share_prev) * margin_prev) * 100, 2) AS mix_effect_pts,
-    ROUND(SUM(share_curr * (margin_curr - margin_prev)) * 100, 2) AS rate_effect_pts
-FROM compare
-GROUP BY order_year
-ORDER BY order_year;
+| Step | What was done | SQL |
+|------|---------------|-----|
+| 1. Data quality | Row counts, nulls, duplicates, logical checks | Part 1 |
+| 2. Trend | Year-over-year sales, profit and margin | Part 2 |
+| 3. Decomposition | Split margin change into mix and rate effects | Part 3 |
+| 4. Discounts | Profitability by discount band; capped-discount scenario | Part 4 |
+| 5. Products | Category and sub-category performance | Part 5 |
+| 6. Geography | Region, state and city performance | Part 6 |
+| 7. Customers | Segments, profit concentration, unprofitable customers | Part 7 |
+| 8. Deep dive | Michigan and Virginia: top-5 profit states with near-zero discounting | Part 8 |
 
--- 3.2 Which sub-categories' margins fell the most in 2017?
-WITH yearly_sub AS (
-    SELECT
-        EXTRACT(YEAR FROM "Order Date") AS order_year,
-        "Sub-Category" AS sub_category,
-        SUM(profit) / SUM(sales) AS margin
-    FROM orders_clean
-    GROUP BY EXTRACT(YEAR FROM "Order Date"), "Sub-Category"
-)
-SELECT
-    sub_category,
-    ROUND(MAX(margin) FILTER (WHERE order_year = 2016) * 100, 1) AS margin_2016_pct,
-    ROUND(MAX(margin) FILTER (WHERE order_year = 2017) * 100, 1) AS margin_2017_pct,
-    ROUND((MAX(margin) FILTER (WHERE order_year = 2017) - MAX(margin) FILTER (WHERE order_year = 2016)) * 100, 1) AS change_pts
-FROM yearly_sub
-GROUP BY sub_category
-ORDER BY change_pts ASC;
+## Data and Assumptions
 
+- **Source:** Superstore sample dataset, 9,994 rows, Jan 2014 – Dec 2017. *[Add link and license/source.]*
+- **Cleaning:** 1 exact duplicate removed (Row IDs 3406 and 3407), leaving 9,993 line items. No nulls, no negative sales or quantities, and no ship dates before order dates were found. Loss-making lines were kept because they are real business outcomes, not errors.
+- **Product IDs:** 32 Product IDs map to more than one product name (IDs were reused across different products), so product-level analysis uses Sub-Category rather than Product ID.
+- **Profit definition:** The dataset has no cost fields. Profit is as reported in the source and is treated as gross/contribution profit, **not** net income. Margin = profit ÷ sales. Cost per line is inferred as sales − profit.
+- **"Deep discount":** discount greater than 20% (see "Why 20%?" above).
+- **Mix vs. rate decomposition:** by sub-category. Mix effect = (current share − prior share) × prior margin. Rate effect = current share × (current margin − prior margin). The two sum to the total margin change.
+- **Scenario method:** list price = sales ÷ (1 − discount). Repriced sales = list price × (1 − cap). Cost is held constant. Volume-loss scenarios scale the repriced lines' new profit down by the share of units lost.
+- **Scenario limits:** The scenario ignores customer churn, halo effects (discounted items driving other purchases), and competitor response. Treat results as a range, not a forecast.
+- **Causation:** The discount findings show a strong, consistent association that holds within sub-categories. They do not prove causation, because discounts may be targeted at products that were already low-margin, and the dataset has no list-price or cost detail to test this.
 
-/* =============================================================================
-   PART 4. DISCOUNT ANALYSIS
-   ============================================================================= */
+## Limitations and Next Steps
 
--- 4.1 Profitability by discount band (whole company)
-SELECT
-    CASE
-        WHEN discount = 0 THEN '1: No discount'
-        WHEN discount <= 0.10 THEN '2: 1-10%'
-        WHEN discount <= 0.20 THEN '3: 11-20%'
-        WHEN discount <= 0.30 THEN '4: 21-30%'
-        ELSE '5: Over 30%'
-    END AS discount_band,
-    COUNT(*) AS line_items,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY discount_band
-ORDER BY discount_band;
+- Add a simple 2018 forecast or actual-vs-target view to cover the planning side of FP&A.
+- Build a dashboard (Tableau / Power BI / Excel) for non-technical stakeholders.
+- Investigate *why* Texas, Ohio, Pennsylvania and Illinois discount so heavily (average discounts of 32–39% vs. 15.6% overall). The pattern looks like a regional pricing practice rather than a product effect.
+- Michigan and Virginia have about 30 orders a year each, so year-to-year swings may reflect a few large orders.
 
--- 4.2 Deep-discount lines (over 20%) vs. everything else
-SELECT
-    CASE WHEN discount > 0.20 THEN 'Discount over 20%' ELSE 'Discount 20% or less' END AS discount_group,
-    COUNT(*) AS line_items,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY discount_group
-ORDER BY discount_group;
+## How to Reproduce
 
--- 4.3 Profit lost on deep-discount lines, by year
-SELECT
-    EXTRACT(YEAR FROM "Order Date") AS order_year,
-    COUNT(*) AS deep_discount_lines,
-    ROUND(SUM(profit), 0) AS profit_on_deep_discount_lines
-FROM orders_clean
-WHERE discount > 0.20
-GROUP BY EXTRACT(YEAR FROM "Order Date")
-ORDER BY order_year;
+1. Install [DuckDB](https://duckdb.org/docs/installation/).
+2. Download the dataset and save it as `data/superstore.csv`. https://www.kaggle.com/datasets/vivek468/superstore-dataset-final*
+3. Run `duckdb < sql/superstore_analysis.sql`, or run the script section by section.
 
--- 4.4 Scenario: what if no line had been discounted more than 20%?
---     Assumes the same units sold at the higher price, so this is an UPPER
---     BOUND (a higher price would likely reduce volume). Cost per line is
---     inferred as sales - profit.
-SELECT
-    ROUND(SUM(profit), 0) AS actual_profit,
-    ROUND(SUM(CASE WHEN discount > 0.20 THEN sales * 0.80 / (1 - discount) - (sales - profit) ELSE profit END), 0) AS profit_if_capped_at_20pct,
-    ROUND(SUM(CASE WHEN discount > 0.20 THEN sales * 0.80 / (1 - discount) - (sales - profit) ELSE profit END) - SUM(profit), 0) AS upper_bound_uplift
-FROM orders_clean;
+## Repository Structure
 
--- 4.5 Discount behavior by sub-category: share of deep-discount lines
-SELECT
-    "Sub-Category" AS sub_category,
-    COUNT(*) AS line_items,
-    ROUND(AVG(CASE WHEN discount > 0.20 THEN 1.0 ELSE 0 END) * 100, 1) AS pct_lines_over_20pct_discount,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY "Sub-Category"
-ORDER BY margin_pct ASC;
+```
+Superstore-Analysis/
+├── README.md
+├── REPORT.md
+├── sql/
+│   └── superstore_analysis.sql
+├── data/
+│   └── superstore.csv
+└── images/
+```
 
+## Tools
 
-/* =============================================================================
-   PART 5. PRODUCT PERFORMANCE
-   ============================================================================= */
-
--- 5.1 Category performance
-SELECT
-    category,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY category
-ORDER BY total_sales DESC;
-
--- 5.2 Sub-category performance, ranked by profit within each category
-SELECT
-    category,
-    "Sub-Category" AS sub_category,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct,
-    RANK() OVER (PARTITION BY category ORDER BY SUM(profit) DESC) AS profit_rank_in_category
-FROM orders_clean
-GROUP BY category, "Sub-Category"
-ORDER BY category, profit_rank_in_category;
-
--- 5.3 Loss-making and low-margin sub-categories (margin under 5%)
-SELECT
-    "Sub-Category" AS sub_category,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY "Sub-Category"
-HAVING SUM(profit) / SUM(sales) < 0.05
-ORDER BY margin_pct ASC;
-
-
-/* =============================================================================
-   PART 6. GEOGRAPHY
-   ============================================================================= */
-
--- 6.1 Region performance with deep-discount share
-SELECT
-    region,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct,
-    ROUND(AVG(CASE WHEN discount > 0.20 THEN 1.0 ELSE 0 END) * 100, 1) AS pct_lines_over_20pct_discount
-FROM orders_clean
-GROUP BY region
-ORDER BY total_profit DESC;
-
--- 6.2 State performance with deep-discount share (all states)
-SELECT
-    region,
-    state,
-    COUNT(DISTINCT "Order ID") AS orders,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct,
-    ROUND(AVG(CASE WHEN discount > 0.20 THEN 1.0 ELSE 0 END) * 100, 1) AS pct_lines_over_20pct_discount
-FROM orders_clean
-GROUP BY region, state
-ORDER BY total_profit DESC;
-
--- 6.3 Loss-making states and the total profit they cost
-SELECT
-    state,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct,
-    ROUND(AVG(CASE WHEN discount > 0.20 THEN 1.0 ELSE 0 END) * 100, 1) AS pct_lines_over_20pct_discount
-FROM orders_clean
-GROUP BY state
-HAVING SUM(profit) < 0
-ORDER BY total_profit ASC;
-
--- 6.4 City performance: top 5 and bottom 5 by profit
-(
-    SELECT 'Top 5' AS grp, state, city, ROUND(SUM(sales), 0) AS total_sales, ROUND(SUM(profit), 0) AS total_profit, ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-    FROM orders_clean
-    GROUP BY state, city
-    ORDER BY SUM(profit) DESC
-    LIMIT 5
-)
-UNION ALL
-(
-    SELECT 'Bottom 5' AS grp, state, city, ROUND(SUM(sales), 0) AS total_sales, ROUND(SUM(profit), 0) AS total_profit, ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-    FROM orders_clean
-    GROUP BY state, city
-    ORDER BY SUM(profit) ASC
-    LIMIT 5
-);
-
-
-/* =============================================================================
-   PART 7. CUSTOMERS AND SEGMENTS
-   ============================================================================= */
-
--- 7.1 Segment performance
-SELECT
-    segment,
-    COUNT(DISTINCT "Customer ID") AS customers,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-GROUP BY segment
-ORDER BY total_sales DESC;
-
--- 7.2 Top 10 customers by sales, with their profit rank
-WITH customer_totals AS (
-    SELECT
-        "Customer ID" AS customer_id,
-        "Customer Name" AS customer_name,
-        COUNT(DISTINCT "Order ID") AS orders,
-        SUM(sales) AS total_sales,
-        SUM(profit) AS total_profit
-    FROM orders_clean
-    GROUP BY "Customer ID", "Customer Name"
-),
-ranked AS (
-    SELECT
-        *,
-        RANK() OVER (ORDER BY total_sales DESC) AS sales_rank,
-        RANK() OVER (ORDER BY total_profit DESC) AS profit_rank
-    FROM customer_totals
-)
-SELECT
-    customer_name,
-    orders,
-    ROUND(total_sales, 0) AS total_sales,
-    ROUND(total_profit, 0) AS total_profit,
-    ROUND(total_profit / total_sales * 100, 1) AS margin_pct,
-    sales_rank,
-    profit_rank
-FROM ranked
-WHERE sales_rank <= 10
-ORDER BY sales_rank;
-
--- 7.3 How many customers are unprofitable, and what do they cost?
-WITH customer_totals AS (
-    SELECT "Customer ID", SUM(profit) AS total_profit
-    FROM orders_clean
-    GROUP BY "Customer ID"
-)
-SELECT
-    COUNT(*) AS total_customers,
-    COUNT(*) FILTER (WHERE total_profit < 0) AS unprofitable_customers,
-    ROUND(SUM(total_profit) FILTER (WHERE total_profit < 0), 0) AS profit_lost_on_unprofitable_customers
-FROM customer_totals;
-
--- 7.4 Profit concentration: share of total profit by customer decile
-WITH customer_totals AS (
-    SELECT "Customer ID", SUM(profit) AS total_profit
-    FROM orders_clean
-    GROUP BY "Customer ID"
-),
-deciles AS (
-    SELECT
-        total_profit,
-        NTILE(10) OVER (ORDER BY total_profit DESC) AS profit_decile
-    FROM customer_totals
-)
-SELECT
-    profit_decile,
-    ROUND(SUM(total_profit), 0) AS decile_profit,
-    ROUND(SUM(total_profit) / SUM(SUM(total_profit)) OVER () * 100, 1) AS pct_of_total_profit
-FROM deciles
-GROUP BY profit_decile
-ORDER BY profit_decile;
-
-
-/* =============================================================================
-   PART 8. MARKET DEEP DIVE: MICHIGAN AND VIRGINIA
-   Both are high-margin, low-volume states (about 30 orders a year each), so
-   year-to-year swings may reflect a handful of large orders.
-   ============================================================================= */
-
--- 8.1 Annual performance
-SELECT
-    state,
-    EXTRACT(YEAR FROM "Order Date") AS order_year,
-    COUNT(DISTINCT "Order ID") AS orders,
-    COUNT(DISTINCT "Customer ID") AS active_customers,
-    ROUND(SUM(sales), 0) AS total_sales,
-    ROUND(SUM(profit), 0) AS total_profit,
-    ROUND(SUM(profit) / SUM(sales) * 100, 1) AS margin_pct
-FROM orders_clean
-WHERE state IN ('Michigan', 'Virginia')
-GROUP BY state, EXTRACT(YEAR FROM "Order Date")
-ORDER BY state, order_year;
-
--- 8.2 New vs. returning customers in Virginia by year
-WITH virginia AS (
-    SELECT
-        "Customer ID" AS customer_id,
-        EXTRACT(YEAR FROM "Order Date") AS order_year
-    FROM orders_clean
-    WHERE state = 'Virginia'
-),
-first_year AS (
-    SELECT customer_id, MIN(order_year) AS first_order_year
-    FROM virginia
-    GROUP BY customer_id
-)
-SELECT
-    v.order_year,
-    COUNT(DISTINCT v.customer_id) AS active_customers,
-    COUNT(DISTINCT v.customer_id) FILTER (WHERE v.order_year = f.first_order_year) AS new_customers,
-    COUNT(DISTINCT v.customer_id) FILTER (WHERE v.order_year > f.first_order_year) AS returning_customers
-FROM virginia v
-JOIN first_year f
-    ON v.customer_id = f.customer_id
-GROUP BY v.order_year
-ORDER BY v.order_year;
+DuckDB · SQL (CTEs, window functions, conditional aggregation)
